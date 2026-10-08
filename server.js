@@ -2,7 +2,6 @@ const express = require('express');
 const axios = require('axios');
 const app = express();
 
-// eSSL machine ke raw text data ko capture karne ke liye
 app.use(express.text({ type: '*/*', limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
@@ -17,12 +16,15 @@ app.all('/iclock/cdata', async (req, res) => {
     try {
         console.log('--- NEW REQUEST FROM MACHINE ---');
         console.log('Query:', req.query);
-        console.log('Body type:', typeof req.body);
-        console.log('Body content:', req.body);
+        console.log('Body:', req.body);
 
-        // Agar body ek object hai aur keys nahi hain, toh usko string me convert karein
         let rawData = req.body;
         if (typeof rawData === 'object' && rawData !== null) {
+            // Agar body empty object {} hai, toh ignore karo
+            if (Object.keys(rawData).length === 0) {
+                console.log('Empty request body received from machine. Skipping Hostinger sync.');
+                return res.send('OK');
+            }
             rawData = JSON.stringify(rawData);
         }
 
@@ -40,7 +42,7 @@ app.all('/iclock/cdata', async (req, res) => {
             });
             console.log('Punches successfully forwarded to Hostinger!');
         } else {
-            console.log('No punches found in this request payload.');
+            console.log('No valid punches found to sync.');
         }
 
         res.send('OK');
@@ -50,7 +52,7 @@ app.all('/iclock/cdata', async (req, res) => {
             console.error('Hostinger Response Error Data:', error.response.data);
             console.error('Hostinger Response Status:', error.response.status);
         }
-        res.send('OK'); // Machine loop me na jaye isliye OK return karna zaroori hai
+        res.send('OK'); 
     }
 });
 
@@ -61,7 +63,6 @@ function parseEsslPunches(rawBody) {
     const lines = rawBody.split('\n');
     for (let line of lines) {
         const parts = line.trim().split(/\s+/);
-        // eSSL standard format: UserID Timestamp Status ...
         if (parts.length >= 2) {
             punches.push({
                 user_id: parts[0],
