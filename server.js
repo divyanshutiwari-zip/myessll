@@ -3,32 +3,27 @@ const axios = require('axios');
 const app = express();
 
 app.use(express.text({ type: '*/*', limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 const HOSTINGER_API_URL = 'https://trosidex.com/dashboard/api/attendance/device-punches';
 const SYNC_SECRET = process.env.SYNC_SECRET || '19f242ec78fcbf655e5f5f9474a3b4354c9a68100bea4d2bd586c05a248234e8';
 
+// Browser testing ya GET pings ke liye seedha OK return karega
 app.get('/iclock/cdata', (req, res) => {
-    res.send('OK');
+    return res.send('OK');
 });
 
-app.all('/iclock/cdata', async (req, res) => {
+// eSSL machine ke POST data ke liye
+app.post('/iclock/cdata', async (req, res) => {
     try {
-        console.log('--- NEW REQUEST FROM MACHINE ---');
+        console.log('--- POST REQUEST FROM eSSL MACHINE ---');
         console.log('Query:', req.query);
         console.log('Body:', req.body);
 
-        let rawData = req.body;
-        if (typeof rawData === 'object' && rawData !== null) {
-            // Agar body empty object {} hai, toh ignore karo
-            if (Object.keys(rawData).length === 0) {
-                console.log('Empty request body received from machine. Skipping Hostinger sync.');
-                return res.send('OK');
-            }
-            rawData = JSON.stringify(rawData);
+        if (!req.body || typeof req.body !== 'string' || req.body.trim() === '') {
+            return res.send('OK');
         }
 
-        const punches = parseEsslPunches(rawData); 
+        const punches = parseEsslPunches(req.body); 
         console.log('Parsed Punches:', punches);
 
         if (punches.length > 0) {
@@ -41,8 +36,6 @@ app.all('/iclock/cdata', async (req, res) => {
                 }
             });
             console.log('Punches successfully forwarded to Hostinger!');
-        } else {
-            console.log('No valid punches found to sync.');
         }
 
         res.send('OK');
@@ -50,7 +43,6 @@ app.all('/iclock/cdata', async (req, res) => {
         console.error('Error forwarding punches:', error.message);
         if (error.response) {
             console.error('Hostinger Response Error Data:', error.response.data);
-            console.error('Hostinger Response Status:', error.response.status);
         }
         res.send('OK'); 
     }
