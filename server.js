@@ -8,12 +8,10 @@ app.use(express.json());
 const HOSTINGER_API_URL = 'https://trosidex.com/dashboard/api/attendance/device-punches';
 const SYNC_SECRET = process.env.SYNC_SECRET || '19f242ec78fcbf655e5f5f9474a3b4354c9a68100bea4d2bd586c05a248234e8';
 
-// Browser testing ke liye GET route
 app.get('/iclock/cdata', (req, res) => {
     res.send('OK');
 });
 
-// eSSL machine ke liye POST/ALL route
 app.all('/iclock/cdata', async (req, res) => {
     try {
         console.log('Received data query:', req.query);
@@ -26,7 +24,7 @@ app.all('/iclock/cdata', async (req, res) => {
                 punches: punches
             }, {
                 headers: {
-                    'Authorization': `Bearer ${SYNC_SECRET}`,
+                    'X-Attendance-Sync-Secret': SYNC_SECRET,
                     'Content-Type': 'application/json'
                 }
             });
@@ -36,7 +34,10 @@ app.all('/iclock/cdata', async (req, res) => {
         res.send('OK');
     } catch (error) {
         console.error('Error forwarding punches:', error.message);
-        res.send('OK'); // Machine ko hamesha OK bhejna chahiye taaki wo error loop mein na jaye
+        if (error.response) {
+            console.error('Response data:', error.response.data);
+        }
+        res.send('OK'); 
     }
 });
 
@@ -58,7 +59,7 @@ function parseEsslPunches(rawBody) {
     return punches;
 }
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
     console.log(`eSSL ADMS Bridge running on port ${PORT}`);
 });
