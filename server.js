@@ -1,111 +1,300 @@
+
 const express = require('express');
 const axios = require('axios');
+
 const app = express();
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-app.use(express.text({ type: '*/*' }));
+const PORT = process.env.PORT || 10000;
+const HOSTINGER_API_URL =
+  'https://trosidex.com/dashboard/api/attendance/device-punches';
 
-const HOSTINGER_API_URL = 'https://trosidex.com/dashboard/api/attendance/device-punches';
-const SYNC_SECRET = process.env.SYNC_SECRET || '19f242ec78fcbf655e5f5f9474a3b4354c9a68100bea4d2bd586c05a248234e8';
+// Never hardcode production secrets.
+if (!process.env.SYNC_SECRET) {
+  throw new Error('SYNC_SECRET environment variable is required');
+}
+const SYNC_SECRET = process.env.SYNC_SECRET;
 
-// Recent logs aur errors ko store karne ke liye array
+// Protect the diagnostic page with HTTP Basic Authentication.
+const LOG_VIEW_USER = process.env.LOG_VIEW_USER;
+const LOG_VIEW_PASSWORD = process.env.LOG_VIEW_PASSWORD;
+
 const recentLogs = [];
+const MAX_LOGS = 100;
+
 function addLog(type, message, details = '') {
-    const timestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
-    recentLogs.unshift({ timestamp, type, message, details });
-    if (recentLogs.length > 50) recentLogs.pop(); // Max 50 logs rakhenge
+  recentLogs.unshift({
+    timestamp: new Date().toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+    }),
+    type,
+    message,
+    details:
+      typeof details === 'string'
+        ? details.slice(0, 4000)
+        : JSON.stringify(details).slice(0, 4000),
+  });
+
+  if (recentLogs.length > MAX_LOGS) recentLogs.pop();
+
+  console.log(`[${type}] ${message}`);
 }
 
-// Browser par errors aur logs dekhne ke liye naya page
-app.get('/errors', (req, res) => {
-    let html = `<html><head><title>Render Bridge Logs & Errors</title><style>body{font-family:Arial;padding:20px;background:#1e1e1e;color:#fff;}pre{background:#2d2d2d;padding:10px;border-radius:5px;overflow-x:auto;color:#ff8787;}.error{color:#ff6b6b;}.success{color:#51cf66;}.info{color:#74c0fc;}</style></head><body>`;
-    html += `<h1>Render Bridge Live Logs & Errors</h1>`;
-    html += `<p><a href="/errors" style="color:#74c0fc; text-decoration:underline;">Refresh Page</a></p>`;
-    html += `<hr style="border-color:#444;">`;
-    
-    if (recentLogs.length === 0) {
-        html += `<p>Abhi tak koi logs record nahi hue hain. Machine se request aane ka wait hai.</p>`;
-    } else {
-        recentLogs.forEach(log => {
-            const colorClass = log.type === 'ERROR' ? 'error' : (log.type === 'SUCCESS' ? 'success' : 'info');
-            html += `<div style="margin-bottom:15px; border-bottom:1px solid #333; padding-bottom:10px;">`;
-            html += `<small style="color:#aaa;">${log.timestamp}</small> | <strong class="${colorClass}">[${log.type}]</strong> <span>${log.message}</span>`;
-            if (log.details) {
-                html += `<pre>${JSON.stringify(log.details, null, 2)}</pre>`;
-            }
-            html += `</div>`;
-        });
-    }
-    html += `</body></html>`;
-    res.send(html);
+// Preserve the incoming request body as raw bytes.
+// eSSL devices commonly send tab-separated text.
+app.use(express.raw({ type: '*/*', limit: '2mb' }));
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[char]);
+}
+
+function requireLogAuth(req, res, next) {
+  if (!LOG_VIEW_USER || !LOG_VIEW_PASSWORD) {
+    return res.status(503).send(
+      'Log page is disabled. Configure LOG_VIEW_USER and LOG_VIEW_PASSWORD in Render.'
+    );
+  }
+
+  const auth = req.headers.authorization || '';
+  const [scheme, encoded] = auth.split(' ');
+
+  if (scheme !== 'Basic' || !encoded) {
+    res.set('WWW-Authenticate', 'Basic realm="Bridge Logs"');
+    return res.status(401).send('Authentication required');
+  }
+
+  let credentials;
+  try {
+    credentials = Buffer.from(encoded, 'base64').toString('utf8');
+  } catch {
+    return res.status(401).send('Invalid credentials');
+  }
+
+  const separator = credentials.indexOf(':');
+  const username = credentials.slice(0, separator);
+  const password = credentials.slice(separator + 1);
+
+  if (
+    separator < 0 ||
+    username !== LOG_VIEW_USER ||
+    password !== LOG_VIEW_PASSWORD
+  ) {
+    res.set('WWW-Authenticate', 'Basic realm="Bridge Logs"');
+    return res.status(401).send('Invalid credentials');
+  }
+
+  next();
+}
+
+// Health check: verifies that the Render service is running.
+app.get('/', (req, res) => {
+  res.status(200).json({
+    status: 'running',
+    service: 'eSSL ADMS Bridge',
+    time: new Date().toISOString(),
+  });
 });
 
+// Protected diagnostic page.
+app.get('/errors', requireLogAuth, (req, res) => {
+  const rows = recentLogs.map((log) => `
+    <div class="entry">
+      <small>${escapeHtml(log.timestamp)}</small>
+      <strong class="${escapeHtml(log.type)}">
+        [${escapeHtml(log.type)}]
+      </strong>
+      <span>${escapeHtml(log.message)}</span>
+      ${log.details
+        ? `<pre>${escapeHtml(log.details)}</pre>`
+        : ''}
+    </div>
+  `).join('');
+
+  res.type('html').send(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="10">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>eSSL Bridge Logs</title>
+  <style>
+    body { font-family: Arial; background:#171717; color:#eee;
+           padding:20px; }
+    .entry { border-bottom:1px solid #444; padding:12px 0; }
+    small { color:#aaa; }
+    pre { white-space:pre-wrap; overflow-wrap:anywhere;
+          background:#252525; padding:12px; }
+    .ERROR { color:#ff7777; }
+    .SUCCESS { color:#69db7c; }
+    .INFO { color:#74c0fc; }
+  </style>
+</head>
+<body>
+  <h2>eSSL ADMS Bridge Logs</h2>
+  <p>Auto-refreshes every 10 seconds. Latest entries appear first.</p>
+  ${rows || '<p>No requests recorded since this service started.</p>'}
+</body>
+</html>`);
+});
+
+// eSSL devices can send GET requests for polling/keep-alive.
 app.get('/iclock/cdata', (req, res) => {
-    addLog('INFO', 'GET request received from browser/ping.');
-    return res.send('OK');
+  addLog('INFO', 'GET /iclock/cdata received', {
+    query: req.query,
+    contentType: req.headers['content-type'] || '',
+  });
+
+  res.status(200).type('text/plain').send('OK');
 });
 
-app.all('/iclock/cdata', async (req, res) => {
-    try {
-        if (!req.body || 
-            (typeof req.body === 'object' && Object.keys(req.body).length === 0) || 
-            (typeof req.body === 'string' && req.body.trim() === '')) {
-            addLog('INFO', 'Empty body or keep-alive ping received from machine.');
-            return res.send('OK');
-        }
+// Receive and process eSSL POST requests.
+app.post('/iclock/cdata', async (req, res) => {
+  const rawBody = Buffer.isBuffer(req.body)
+    ? req.body.toString('utf8')
+    : String(req.body ?? '');
 
-        let rawData = req.body;
-        if (typeof rawData === 'object') {
-            rawData = JSON.stringify(rawData);
-        }
+  addLog('INFO', 'POST /iclock/cdata received', {
+    query: req.query,
+    contentType: req.headers['content-type'] || '',
+    bodyLength: Buffer.byteLength(rawBody, 'utf8'),
+    bodyPreview: rawBody.slice(0, 1500),
+  });
 
-        const punches = parseEsslPunches(rawData); 
-        addLog('INFO', `Parsed ${punches.length} punches from machine raw data.`);
+  if (!rawBody.trim()) {
+    addLog('INFO', 'Empty body received; responding OK');
+    return res.status(200).type('text/plain').send('OK');
+  }
 
-        if (punches.length > 0) {
-            try {
-                const response = await axios.post(HOSTINGER_API_URL, {
-                    punches: punches
-                }, {
-                    headers: {
-                        'X-Attendance-Sync-Secret': SYNC_SECRET,
-                        'Content-Type': 'application/json'
-                    }
-                });
-                addLog('SUCCESS', `Successfully forwarded ${punches.length} punches to Hostinger! Response:`, response.data);
-            } catch (apiError) {
-                const errData = apiError.response ? { status: apiError.response.status, data: apiError.response.data } : apiError.message;
-                addLog('ERROR', `Hostinger API rejected request: ${apiError.message}`, errData);
-            }
-        }
+  const punches = parseEsslPunches(rawBody);
 
-        return res.send('OK');
-    } catch (error) {
-        addLog('ERROR', `Exception in /iclock/cdata: ${error.message}`);
-        return res.send('OK'); 
+  addLog('INFO', `Parsed ${punches.length} attendance punches`);
+
+  if (punches.length === 0) {
+    addLog('INFO', 'No recognizable punch rows found', {
+      bodyPreview: rawBody.slice(0, 1500),
+    });
+
+    // ADMS devices generally expect a response even for non-punch requests.
+    return res.status(200).type('text/plain').send('OK');
+  }
+
+  try {
+    const response = await axios.post(
+      HOSTINGER_API_URL,
+      { punches },
+      {
+        headers: {
+          'X-Attendance-Sync-Secret': SYNC_SECRET,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        timeout: 15000,
+        validateStatus: () => true,
+      }
+    );
+
+    if (response.status >= 200 && response.status < 300) {
+      addLog('SUCCESS', `Laravel accepted ${punches.length} punches`, {
+        status: response.status,
+        response: response.data,
+      });
+    } else {
+      addLog('ERROR', 'Laravel API returned a non-success status', {
+        status: response.status,
+        response: response.data,
+        endpoint: HOSTINGER_API_URL,
+      });
     }
+  } catch (error) {
+    addLog('ERROR', 'Could not reach Laravel API', {
+      message: error.message,
+      code: error.code || '',
+      status: error.response?.status || null,
+      response: error.response?.data || null,
+    });
+  }
+
+  // Response required by the device. A failed forwarding attempt is
+  // recorded above; this does not guarantee that Laravel saved punches.
+  return res.status(200).type('text/plain').send('OK');
+});
+
+// Record unexpected requests instead of silently ignoring them.
+app.use((req, res) => {
+  addLog('INFO', 'Other endpoint requested', {
+    method: req.method,
+    path: req.path,
+    query: req.query,
+  });
+
+  res.status(404).type('text/plain').send('Not Found');
 });
 
 function parseEsslPunches(rawBody) {
-    const punches = [];
-    if (!rawBody || typeof rawBody !== 'string') return punches;
+  const punches = [];
 
-    const lines = rawBody.split('\n');
-    for (let line of lines) {
-        const parts = line.trim().split(/\s+/);
-        if (parts.length >= 2) {
-            punches.push({
-                user_id: parts[0],
-                timestamp: parts[1] + (parts[2] ? ' ' + parts[2] : ''),
-                status: parts[3] ? parseInt(parts[3]) : 0
-            });
-        }
+  for (const originalLine of rawBody.split(/\r?\n/)) {
+    const line = originalLine.trim();
+    if (!line) continue;
+
+    // Typical ADMS attendance rows contain a PIN, timestamp,
+    // status, verification mode, work code, etc.
+    const parts = line.split(/\s+/);
+
+    if (parts.length < 2) continue;
+
+    const userId = parts[0];
+    const date = parts[1];
+
+    // Ignore protocol/status lines and headers.
+    if (
+      /^(OK|ERROR|GET|POST|ATTLOG|OPERLOG|USER|table=|SN=)/i.test(userId)
+    ) {
+      continue;
     }
-    return punches;
+
+    // Support timestamps split into date + time.
+    let timestamp;
+    let statusIndex;
+
+    if (
+      parts.length >= 3 &&
+      /^\d{4}-\d{2}-\d{2}$/.test(date) &&
+      /^\d{2}:\d{2}:\d{2}$/.test(parts[2])
+    ) {
+      timestamp = `${date} ${parts[2]}`;
+      statusIndex = 3;
+    } else if (
+      /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/.test(
+        parts.slice(1).join(' ')
+      )
+    ) {
+      const combined = parts.slice(1).join(' ');
+      timestamp = combined.slice(0, 19).replace('T', ' ');
+      statusIndex = 2;
+    } else {
+      // Do not forward rows whose timestamp cannot be recognized.
+      continue;
+    }
+
+    const statusValue = Number.parseInt(parts[statusIndex], 10);
+
+    punches.push({
+      user_id: userId,
+      timestamp,
+      status: Number.isFinite(statusValue) ? statusValue : 0,
+    });
+  }
+
+  return punches;
 }
 
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-    console.log(`eSSL ADMS Bridge running on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`eSSL ADMS Bridge running on port ${PORT}`);
+  addLog('INFO', 'Bridge started');
 });
